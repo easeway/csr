@@ -17,7 +17,12 @@ const (
     DataDir = ".csr"
     RepoDir = "repos"
 
-    usageText = `Usage: <Command> [Options] [Arguments...]
+    Version = "1.0.0"
+    VersionInfo = "Common Scripting Repository v" + Version
+
+    usageText = VersionInfo + `
+
+Usage: <Command> [Options] [Arguments...]
 
     add GIT-REPO-URL [NAME]
         Install a scripting repository to local (~/.csr/repos). NAME is
@@ -33,6 +38,12 @@ const (
     sync [NAME...]
         Synchronize named (or all if names not specified) local scripting
         repositories.
+
+    clean
+        Remove all symbolic links.
+
+    version
+        Display version information.
     `
 )
 
@@ -53,7 +64,7 @@ type repoCommand struct {
 }
 
 func allLocalRepos() (repos []*localRepo) {
-    repos = make([]*localRepo, 0)
+    repoNames := make([]string, 0)
     d, err := os.Open(filepath.Join(reposDir))
     if err != nil {
         return
@@ -63,8 +74,13 @@ func allLocalRepos() (repos []*localRepo) {
         if infos, err := d.Readdir(1); err != nil {
             break
         } else if infos[0].IsDir() {
-            repos = append(repos, &localRepo{infos[0].Name()})
+            repoNames = append(repoNames, infos[0].Name())
         }
+    }
+    sort.Strings(repoNames)
+    repos = make([]*localRepo, 0, len(repoNames))
+    for _, name := range repoNames {
+        repos = append(repos, &localRepo{name})
     }
     return
 }
@@ -115,8 +131,8 @@ func (r *localRepo) setup(mode string) error {
             continue
         }
         if tokens := strings.Split(script, "/"); len(tokens) >= 4 {
-            suite := tokens[len(tokens)-3]
-            r.log("SETUP", strings.Join(tokens[len(tokens)-3:], "/"))
+            suite := tokens[len(tokens)-4]
+            r.log("SETUP", strings.Join(tokens[len(tokens)-4:], "/"))
             cmd := exec.Command(script, mode)
             cmd.Stdin = os.Stdin
             cmd.Stdout = os.Stdout
@@ -140,7 +156,7 @@ func (r *localRepo) remove() error {
 
 func (r *localRepo) commands() []*repoCommand {
     cmds := make([]*repoCommand, 0)
-    if scripts, err := filepath.Glob(filepath.Join(r.path(), "suites", "*", "bin", "*")); err != nil {
+    if scripts, err := filepath.Glob(filepath.Join(r.path(), "suites", "*", "bin", "*")); err == nil {
         for _, script := range scripts {
             if !executable(script) {
                 continue
@@ -157,6 +173,10 @@ func (r *localRepo) commands() []*repoCommand {
         }
     }
     return cmds
+}
+
+func (r *localRepo) exec(suite, cmd string, args []string) error {
+    return syscall.Exec(filepath.Join(r.path(), "suites", suite, "bin", cmd), args, append(r.prepareEnv(suite), "CSR_COMMAND=" + cmd))
 }
 
 func (r *localRepo) prepareEnv(suite string) []string {
@@ -191,6 +211,54 @@ func git(wd string, args ...string) (string, error) {
     }
 }
 
+func setuid() {
+    if st, err := os.Stat(destBinDir); err == nil {
+        ownerUid := st.Sys().(*syscall.Stat_t).Uid
+        if currentUser, err := user.Current(); err == nil {
+            if fmt.Sprintf("%v", ownerUid) != currentUser.Uid {
+                syscall.Setuid(int(ownerUid))
+            }
+        }
+    }
+}
+
+func linkedCmds(forInstall bool) ([]string, error) {
+    cmds := make([]string, 0)
+    d, err := os.Open(destBinDir)
+    if err != nil {
+        if os.IsNotExist(err) && forInstall {
+            if err := os.MkdirAll(destBinDir, 0755); err != nil {
+                fmt.Fprintf(os.Stderr, "Unable to create bin directory: %s: %v\n", destBinDir, err);
+                return cmds, err
+            }
+            d, err = os.Open(destBinDir)
+        }
+    }
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Unable to access bin directory: %s: %v\n", destBinDir, err);
+        return cmds, err
+    }
+    defer d.Close()
+    for {
+        if info, err := d.Readdir(1); err != nil {
+            if err == io.EOF {
+                break
+            }
+            fmt.Fprintf(os.Stderr, "Scanning bin directory %s failed: %v\n", destBinDir, err)
+            return cmds, err
+        } else if info[0].IsDir() || (info[0].Mode() & os.ModeSymlink) == 0 {
+            continue
+        } else if name, err := os.Readlink(filepath.Join(destBinDir, info[0].Name())); err != nil {
+            continue
+        } else if name != OriginalProgram && name != destOrigBin {
+            continue
+        } else {
+            cmds = append(cmds, info[0].Name())
+        }
+    }
+    return cmds, nil
+}
+
 func installRepo(url, name string) {
     r := &localRepo{name}
     if r.exists() {
@@ -203,19 +271,18 @@ func installRepo(url, name string) {
         os.Exit(1)
     }
 
-    if err := r.setup("install"); err != nil {
-        fmt.Fprintf(os.Stderr, "Setup repository %s failed: %v\n", r.name, err)
-        os.Exit(1)
-    }
-
-    syncRepos()
+    syncRepos(false, name, "--setup")
 }
 
 func uninstallRepo(name string) {
     r := &localRepo{name}
     if r.exists() {
-        if err := r.remove(); err != nil {
+        err := r.remove()
+        if err != nil {
             fmt.Fprintf(os.Stderr, "Remove repository %s failed: %v\n", r.name, err)
+        }
+        syncRepos(false)
+        if err != nil {
             os.Exit(1)
         }
     }
@@ -232,28 +299,35 @@ func listRepoAndCommands() {
     }
 }
 
-func syncRepos(names ...string) {
+func syncRepos(update bool, names ...string) {
     allRepos := allLocalRepos()
-    repos := make([]*localRepo, 0, len(allRepos))
+    forceSetup := false
     selectedNames := make(map[string]bool)
     for _, name := range names {
+        if name == "--setup" || name == "-s" {
+            forceSetup = true
+            continue
+        }
         selectedNames[name] = true
     }
 
     cmdSrc := make(map[string][]string)
     fails := 0
     for _, r := range allRepos {
-        if len(selectedNames) > 0 && !selectedNames[r.name] {
-            continue
-        }
-        repos = append(repos, r)
-        if updated, err := r.update(); err != nil {
-            fmt.Fprintf(os.Stderr, "Unable to update repository %s: %v\n", r.name, err)
-            fails ++
-        } else if updated {
-            if err := r.setup("install"); err != nil {
-                fmt.Fprintf(os.Stderr, "Setup repository %s failed: %v\n", r.name, err)
-                fails ++
+        if len(selectedNames) == 0 || selectedNames[r.name] {
+            updated := false
+            var err error = nil
+            if update {
+                if updated, err = r.update(); err != nil {
+                    fmt.Fprintf(os.Stderr, "Unable to update repository %s: %v\n", r.name, err)
+                    fails ++
+                }
+            }
+            if err == nil && (forceSetup || updated) {
+                if err = r.setup("install"); err != nil {
+                    fmt.Fprintf(os.Stderr, "Setup repository %s failed: %v\n", r.name, err)
+                    fails ++
+                }
             }
         }
         cmds := r.commands()
@@ -265,39 +339,9 @@ func syncRepos(names ...string) {
         os.Exit(1)
     }
 
-    d, err := os.Open(destBinDir)
+    existingCmds, err := linkedCmds(true)
     if err != nil {
-        if os.IsNotExist(err) {
-            if err := os.MkdirAll(destBinDir, 0755); err != nil {
-                fmt.Fprintf(os.Stderr, "Unable to create bin directory: %s: %v\n", destBinDir, err);
-                os.Exit(1)
-            }
-            d, err = os.Open(destBinDir)
-        }
-    }
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "Unable to access bin directory: %s: %v\n", destBinDir, err);
         os.Exit(1)
-    }
-    defer d.Close()
-
-    existingCmds := make([]string, 0)
-    for {
-        if info, err := d.Readdir(1); err != nil {
-            if err == io.EOF {
-                break
-            }
-            fmt.Fprintf(os.Stderr, "Scanning bin directory %s failed: %v\n", destBinDir, err)
-            os.Exit(1)
-        } else if info[0].IsDir() || (info[0].Mode() & os.ModeSymlink) == 0 {
-            continue
-        } else if name, err := os.Readlink(filepath.Join(destBinDir, info[0].Name())); err != nil {
-            continue
-        } else if name != OriginalProgram && name != destOrigBin {
-            continue
-        } else {
-            existingCmds = append(existingCmds, name)
-        }
     }
     sort.Strings(existingCmds)
 
@@ -313,38 +357,69 @@ func syncRepos(names ...string) {
     }
     sort.Strings(allCmds)
 
+    setuid()
+
     i := 0
     j := 0
     for i < len(allCmds) && j < len(existingCmds) {
         if allCmds[i] < existingCmds[j] {
             bin := filepath.Join(destBinDir, allCmds[i])
+            fmt.Fprintf(os.Stdout, "+ %s\n", bin)
             if err := os.Symlink(OriginalProgram, bin); err != nil {
                 fmt.Fprintf(os.Stderr, "Failed to create symlink: %s: %v\n", bin, err)
                 fails ++
             }
             i ++
         } else if allCmds[i] > existingCmds[j] {
-            os.Remove(filepath.Join(destBinDir, existingCmds[j]))
+            bin := filepath.Join(destBinDir, existingCmds[j])
+            fmt.Fprintf(os.Stdout, "- %s\n", bin)
+            os.Remove(bin)
             j ++
         } else {
+            fmt.Fprintf(os.Stdout, "* %s\n", filepath.Join(destBinDir, allCmds[i]))
             i ++
             j ++
         }
     }
     for i < len(allCmds) {
         bin := filepath.Join(destBinDir, allCmds[i])
+        fmt.Fprintf(os.Stdout, "+ %s\n", bin)
         if err := os.Symlink(OriginalProgram, bin); err != nil {
             fmt.Fprintf(os.Stderr, "Failed to create symlink: %s: %v\n", bin, err)
             fails ++
         }
         i ++
     }
-    for j < len(existingCmds[j]) {
-        os.Remove(filepath.Join(destBinDir, existingCmds[j]))
+    for j < len(existingCmds) {
+        bin := filepath.Join(destBinDir, existingCmds[j])
+        fmt.Fprintf(os.Stdout, "- %s\n", bin)
+        os.Remove(bin)
+        j ++
     }
     if fails > 0 {
         os.Exit(1)
     }
+}
+
+func cleanSymlinks() {
+    if cmds, err := linkedCmds(false); err != nil {
+        if !os.IsNotExist(err) {
+            os.Exit(1)
+        }
+    } else {
+        setuid()
+        for _, cmd := range cmds {
+            bin := filepath.Join(destBinDir, cmd)
+            fmt.Fprintf(os.Stdout, "- %s\n", bin)
+            if err := os.Remove(bin); err != nil {
+                fmt.Fprintf(os.Stderr, "Remove %s failed: %v\n", cmd, err)
+            }
+        }
+    }
+}
+
+func showVersion() {
+    fmt.Fprintf(os.Stdout, "%s\n", VersionInfo)
 }
 
 func showUsageAndExit() {
@@ -387,18 +462,33 @@ func runOriginal() {
         case "list":
             listRepoAndCommands()
         case "sync":
-            syncRepos(os.Args[2:]...)
+            syncRepos(true, os.Args[2:]...)
+        case "clean":
+            cleanSymlinks()
+        case "version":
+            showVersion()
         default:
             showUsageAndExit()
     }
 }
 
 func runDelegation(cmd string, args []string) {
-    if files, _ := filepath.Glob(filepath.Join(reposDir, "*", "suites", "*", "bin", cmd)); len(files) > 0 {
-        if err := syscall.Exec(files[0], args, os.Environ()); err != nil {
-            fmt.Fprintf(os.Stderr, "Exec failed: %v\n", err)
-            os.Exit(128)
+    files, _ := filepath.Glob(filepath.Join(reposDir, "*", "suites", "*", "bin", cmd))
+    var lastErr error = nil
+    for _, fn := range files {
+        tokens := strings.Split(fn, "/")
+        if len(tokens) < 5 {
+            continue
         }
+        suite := tokens[len(tokens)-3]
+        r := &localRepo{tokens[len(tokens)-5]}
+        if lastErr = r.exec(suite, cmd, args); lastErr == nil {
+            break
+        }
+    }
+    if lastErr != nil {
+        fmt.Fprintf(os.Stderr, "Exec failed: %v\n", lastErr)
+        os.Exit(128)
     } else {
         fmt.Fprintf(os.Stderr, "Command not found: %s\n", cmd)
         os.Exit(1)
@@ -429,6 +519,6 @@ func main() {
     if base := filepath.Base(os.Args[0]); base == OriginalProgram {
         runOriginal()
     } else {
-        runDelegation(base, os.Args[1:])
+        runDelegation(base, os.Args)
     }
 }
