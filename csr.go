@@ -35,9 +35,10 @@ Usage: <Command> [Options] [Arguments...]
     list
         List currently installed scripting repositories and all commands.
 
-    sync [NAME...]
+    sync [NAME...] [--setup|-s]
         Synchronize named (or all if names not specified) local scripting
         repositories.
+        When --setup is specified, run install scripts even there's no updates
 
     clean
         Remove all symbolic links.
