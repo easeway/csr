@@ -17,6 +17,21 @@ All scripts submitted in the git repository will be directly accessible from com
 For example, a contributor added a shell script called "show-me-the-magic".
 After all other members typed `csr sync`, they can use `show-me-the-magic` directly from commandline.
 
+## How to build
+
+```bash
+go build csr.go
+
+# Recommended installation
+sudo mv csr /usr/local/bin/
+sudo chown 0:0 /usr/local/bin/csr
+sudo chmod a+rsx /usr/local/bin/csr # the s bit allow csr maintain symlinks when invoked with a non-privileged user
+```
+
+Don't worry about `s` bit set on `csr` executable.
+It only elevate to root privilege when installing symbolic links.
+It runs as current user invoking the actual scripts.
+
 ## How it works?
 
 `csr` is a simple binary built from `csr.go`,
@@ -66,10 +81,12 @@ Usage: <Command> [Options] [Arguments...]
     list
         List currently installed scripting repositories and all commands.
 
-    sync [NAME...] [--setup|-s]
+    sync [NAME...] [--setup|-s] [--local|-l]
         Synchronize named (or all if names not specified) local scripting
         repositories.
         When --setup is specified, run install scripts even there's no updates
+        When --local is specified, skip fetching changes from remote, and only
+        synchronize symbolic links.
 
     clean
         Remove all symbolic links.
@@ -77,6 +94,21 @@ Usage: <Command> [Options] [Arguments...]
     version
         Display version information.
 ```
+
+## Environment for scripts
+
+The following environment variables are pre-set for all binaries invoked by `csr`:
+
+- `CSR_OS`: host OS type, can be `linux`, `darwin`
+- `CSR_ARCH`: host CPU architecture, can be `386`, `amd64`
+- `CSR_BIN_DIR`: directory for installing symbolic links, default to `/usr/local/bin`
+- `CSR_BIN`: full path to `csr` binary, default to `$CSR_BIN_DIR/csr`
+- `CSR_REPOS_BASE`: path to directory containing all repositories, default to `$HOME/.csr/repos`
+- `CSR_REPO_NAME`: repository name containing invoked binary
+- `CSR_REPO_DIR`: path to the repository containing invoked binary, it's `$CSR_REPOS_BASE/$CSR_REPO_NAME`
+- `CSR_SUITE_NAME`: name of the suite containing invoked binary
+- `CSR_SUITE_DIR`: path to the suite containing invoked binary, it's `$CSR_REPO_DIR/suites/$CSR_SUITE_NAME`
+- `CSR_COMMAND`: the actual command invoked
 
 ## Supported Platforms
 

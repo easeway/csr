@@ -7,6 +7,7 @@ import (
     "os/exec"
     "os/user"
     "path/filepath"
+    "runtime"
     "sort"
     "strings"
     "syscall"
@@ -182,6 +183,7 @@ func (r *localRepo) exec(suite, cmd string, args []string) error {
 
 func (r *localRepo) prepareEnv(suite string) []string {
     return append(os.Environ(),
+        "CSR_SUITE_NAME=" + suite,
         "CSR_SUITE_DIR=" + filepath.Join(r.path(), "suites", suite),
         "CSR_REPO_NAME=" + r.name,
         "CSR_REPO_DIR=" + r.path())
@@ -307,6 +309,9 @@ func syncRepos(update bool, names ...string) {
     for _, name := range names {
         if name == "--setup" || name == "-s" {
             forceSetup = true
+            continue
+        } else if name == "--local" || name == "-l" {
+            update = false
             continue
         }
         selectedNames[name] = true
@@ -516,6 +521,9 @@ func main() {
     } else {
         os.Setenv("CSR_BIN", destOrigBin)
     }
+
+    os.Setenv("CSR_OS", runtime.GOOS)
+    os.Setenv("CSR_ARCH", runtime.GOARCH)
 
     if base := filepath.Base(os.Args[0]); base == OriginalProgram {
         runOriginal()
