@@ -1,8 +1,10 @@
 package main
 
 import (
+    "bytes"
     "fmt"
     "io"
+    "io/ioutil"
     "os"
     "os/exec"
     "os/user"
@@ -11,6 +13,9 @@ import (
     "sort"
     "strings"
     "syscall"
+
+    "github.com/grymoire7/blackfriday"
+    "github.com/ericaro/ansifmt/ansiblackfriday"
 )
 
 const (
@@ -35,6 +40,10 @@ Usage: <Command> [Options] [Arguments...]
 
     list
         List currently installed scripting repositories and all commands.
+
+    help NAME
+        View command document.
+        The markdown document is rendered and piped to "less".
 
     sync [NAME...] [--setup|-s]
         Synchronize named (or all if names not specified) local scripting
@@ -302,6 +311,53 @@ func listRepoAndCommands() {
     }
 }
 
+func renderMarkdown(fn string) error {
+    if doc, err := ioutil.ReadFile(fn); err != nil {
+        return err
+    } else {
+        render := ansiblackfriday.NewAnsiRenderer()
+        content := blackfriday.Markdown(doc, render,
+            blackfriday.EXTENSION_NO_INTRA_EMPHASIS |
+            blackfriday.EXTENSION_TABLES |
+            blackfriday.EXTENSION_FENCED_CODE |
+            blackfriday.EXTENSION_AUTOLINK |
+            blackfriday.EXTENSION_STRIKETHROUGH |
+            blackfriday.EXTENSION_SPACE_HEADERS |
+            blackfriday.EXTENSION_HEADER_IDS)
+        viewer := exec.Command("less", "-r")
+        viewer.Env = os.Environ()
+        viewer.Stdout = os.Stdout
+        viewer.Stderr = os.Stderr
+        viewer.Stdin = bytes.NewBuffer(content)
+        return viewer.Run()
+    }
+}
+
+func viewMarkdown(fn string) error {
+    if docViewer := os.Getenv("CSR_DOC_VIEWER"); docViewer != "" {
+        viewer := exec.Command(docViewer, fn)
+        viewer.Stdout = os.Stdout
+        viewer.Stderr = os.Stderr
+        viewer.Stdin = os.Stdin
+        return viewer.Run()
+    } else {
+        return renderMarkdown(fn)
+    }
+}
+
+func showHelpDoc(cmd string) {
+    files, _ := filepath.Glob(filepath.Join(reposDir, "*", "suites", "*", "docs", cmd + ".md"))
+    for _, fn := range files {
+        if err := viewMarkdown(fn); err == nil {
+            return
+        } else {
+            fmt.Fprintf(os.Stderr, "Error to view %s: %v\n", fn, err)
+        }
+    }
+    fmt.Fprintf(os.Stderr, "No document found for: %s\n", cmd)
+    os.Exit(1)
+}
+
 func syncRepos(update bool, names ...string) {
     allRepos := allLocalRepos()
     forceSetup := false
@@ -467,6 +523,12 @@ func runOriginal() {
             }
         case "list":
             listRepoAndCommands()
+        case "help":
+            if len(os.Args) < 3 {
+                showUsageAndExit()
+            } else {
+                showHelpDoc(os.Args[2])
+            }
         case "sync":
             syncRepos(true, os.Args[2:]...)
         case "clean":

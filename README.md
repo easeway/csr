@@ -20,6 +20,8 @@ After all other members typed `csr sync`, they can use `show-me-the-magic` direc
 ## How to build
 
 ```bash
+export GOPATH=$(pwd)/vendor
+go get -d .
 go build csr.go
 
 # Recommended installation
@@ -54,12 +56,15 @@ Similarly to `busybox`, `csr` relies on `args[0]` to determine which command to 
          |   |--command1
          |   |--command2
          |--setup/
-             |--install
-             |   |--install1.sh
-             |   |--install2.sh
-             |--uninstall
-                 |--uninstall1.sh
-                 |--uninstall2.sh
+         |   |--install
+         |   |   |--install1.sh
+         |   |   |--install2.sh
+         |   |--uninstall
+         |       |--uninstall1.sh
+         |       |--uninstall2.sh
+         |--docs/
+             |--command1.md
+             |--command2.md
 ```
 
 A repository contains multiple `suites` each containing a set of commands in `bin` folder, and also a set of `install` and `uninstall` scripts under `setup` folder.
@@ -80,6 +85,10 @@ Usage: <Command> [Options] [Arguments...]
 
     list
         List currently installed scripting repositories and all commands.
+
+    help NAME
+        View command document.
+        The markdown document is rendered and piped to "less".
 
     sync [NAME...] [--setup|-s] [--local|-l]
         Synchronize named (or all if names not specified) local scripting
@@ -109,6 +118,11 @@ The following environment variables are pre-set for all binaries invoked by `csr
 - `CSR_SUITE_NAME`: name of the suite containing invoked binary
 - `CSR_SUITE_DIR`: path to the suite containing invoked binary, it's `$CSR_REPO_DIR/suites/$CSR_SUITE_NAME`
 - `CSR_COMMAND`: the actual command invoked
+
+## Documenting the commands
+
+The sub folder `docs` under a suite is used for looking up document of a command.
+The file name must be the same as the command with extension `.md`.
 
 ## Supported Platforms
 
