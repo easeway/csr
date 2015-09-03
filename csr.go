@@ -62,6 +62,7 @@ var (
     reposDir    = filepath.Join("~", DataDir, RepoDir)
     destBinDir  = "/usr/local/bin"
     destOrigBin = filepath.Join(destBinDir, OriginalProgram)
+    shell       = os.Getenv("SHELL")
 )
 
 type localRepo struct {
@@ -107,11 +108,7 @@ func (r *localRepo) path() string {
 
 func (r *localRepo) clone(url string) error {
     r.log("CREATE", "Clone from " + url)
-    if err := os.MkdirAll(reposDir, 0777); err != nil {
-        if !os.IsExist(err) {
-            return err
-        }
-    }
+    exec.Command(shell, "-c", "mkdir -m 0775 -p " + reposDir).Run()
     _, err := git(reposDir, "clone", url, r.path())
     return err
 }
@@ -144,7 +141,7 @@ func (r *localRepo) setup(mode string) error {
         if tokens := strings.Split(script, "/"); len(tokens) >= 4 {
             suite := tokens[len(tokens)-4]
             r.log("SETUP", strings.Join(tokens[len(tokens)-4:], "/"))
-            cmd := exec.Command(script, mode)
+            cmd := exec.Command(shell, "-c", script + " " + mode)
             cmd.Stdin = os.Stdin
             cmd.Stdout = os.Stdout
             cmd.Stderr = os.Stderr
@@ -187,6 +184,7 @@ func (r *localRepo) commands() []*repoCommand {
 }
 
 func (r *localRepo) exec(suite, cmd string, args []string) error {
+    syscall.Setreuid(-1, os.Getuid())
     return syscall.Exec(filepath.Join(r.path(), "suites", suite, "bin", cmd), args, append(r.prepareEnv(suite), "CSR_COMMAND=" + cmd))
 }
 
@@ -212,7 +210,7 @@ func executable(script string) bool {
 }
 
 func git(wd string, args ...string) (string, error) {
-    cmd := exec.Command("git", args...)
+    cmd := exec.Command(shell, "-c", "git " + strings.Join(args, " "))
     cmd.Stdin = os.Stdin
     cmd.Stderr = os.Stderr
     cmd.Dir = wd
@@ -220,17 +218,6 @@ func git(wd string, args ...string) (string, error) {
         return "", err
     } else {
         return string(out), err
-    }
-}
-
-func setuid() {
-    if st, err := os.Stat(destBinDir); err == nil {
-        ownerUid := st.Sys().(*syscall.Stat_t).Uid
-        if currentUser, err := user.Current(); err == nil {
-            if fmt.Sprintf("%v", ownerUid) != currentUser.Uid {
-                syscall.Setuid(int(ownerUid))
-            }
-        }
     }
 }
 
@@ -324,7 +311,7 @@ func renderMarkdown(fn string) error {
             blackfriday.EXTENSION_STRIKETHROUGH |
             blackfriday.EXTENSION_SPACE_HEADERS |
             blackfriday.EXTENSION_HEADER_IDS)
-        viewer := exec.Command("less", "-r")
+        viewer := exec.Command(shell, "-c", "less -r")
         viewer.Env = os.Environ()
         viewer.Stdout = os.Stdout
         viewer.Stderr = os.Stderr
@@ -335,7 +322,7 @@ func renderMarkdown(fn string) error {
 
 func viewMarkdown(fn string) error {
     if docViewer := os.Getenv("CSR_DOC_VIEWER"); docViewer != "" {
-        viewer := exec.Command(docViewer, fn)
+        viewer := exec.Command(shell, "-c", docViewer + " " + fn)
         viewer.Stdout = os.Stdout
         viewer.Stderr = os.Stderr
         viewer.Stdin = os.Stdin
@@ -419,8 +406,6 @@ func syncRepos(update bool, names ...string) {
     }
     sort.Strings(allCmds)
 
-    setuid()
-
     i := 0
     j := 0
     for i < len(allCmds) && j < len(existingCmds) {
@@ -469,7 +454,6 @@ func cleanSymlinks() {
             os.Exit(1)
         }
     } else {
-        setuid()
         for _, cmd := range cmds {
             bin := filepath.Join(destBinDir, cmd)
             fmt.Fprintf(os.Stdout, "- %s\n", bin)
@@ -564,6 +548,10 @@ func runDelegation(cmd string, args []string) {
 }
 
 func main() {
+    if shell == "" {
+        shell = "sh"
+    }
+
     if u, err := user.Current(); err == nil {
         reposDir = filepath.Join(u.HomeDir, DataDir, RepoDir)
     }
